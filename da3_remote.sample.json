@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 10022,
+  "username": "notebook",
+  "password": "CHANGE_ME",
+  "remote_workspace": "/kaggle/working/DA3",
+  "remote_miniforge": "/kaggle/working/miniforge3",
+  "remote_env_name": "da3-remote",
+  "remote_fare_drive_root": "/kaggle/working/DA3/fare-drive-server",
+  "remote_fare_drive_port": 8876,
+  "remote_fare_drive_username": "manager",
+  "remote_fare_drive_password": "manager-pass",
+  "remote_fare_drive_storage_limit_gb": 25,
+  "transport": "mega",
+  "drive_folder_url": "https://drive.google.com/drive/folders/1SWlrL2pjpM11mYTZAQCyLZJKjwdAGY76?usp=sharing",
+  "manifest_path": "",
+  "worker_count": 2
+}

@@ -1,0 +1,9 @@
+name: da3-manager
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - paramiko
+  - psutil
+  - pytest

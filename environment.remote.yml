@@ -1,0 +1,10 @@
+name: da3-remote
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - psutil
+  - pip:
+      - setuptools
+      - wheel

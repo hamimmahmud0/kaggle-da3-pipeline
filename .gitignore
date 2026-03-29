@@ -5,4 +5,15 @@ __pycache__/
 
 outputs/
 *.pt
-
+*.log
+*.token
+*.tmp
+.DS_Store
+.env
+da3_remote.json
+cred.txt
+.codex
+Fare-Drive/token.txt
+Fare-Drive/src/fare_drive.egg-info/
+Fare-Drive/src/fare_drive/__pycache__/
+Fare-Drive/tests/__pycache__/

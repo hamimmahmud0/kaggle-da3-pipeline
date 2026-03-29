@@ -1,8 +1,0 @@
-Success! Your new application key has been created. It will only appear here once.
-
-keyID:
-0051caafb60631b0000000001
-keyName:
-da3key
-applicationKey:
-K005um8BIuh2g7HDyLqVWbejIQ6xM9M
