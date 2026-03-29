@@ -54,11 +54,12 @@ def _validate_request(req: dict) -> dict:
     return req
 
 
-def _run_inference(model, req: dict, default_export_format: str) -> None:
+def _run_inference(model, req: dict, default_export_format: str, default_batch_size: int) -> None:
     image_paths = req["image_paths"]
     video_name = req["video_name"]
     file_name = req["file_name"]
     export_format = req.get("export_format", default_export_format)
+    batch_size = int(req.get("batch_size", default_batch_size))
 
     export_dir = os.path.join("output", str(video_name), str(file_name))
     os.makedirs(export_dir, exist_ok=True)
@@ -67,6 +68,7 @@ def _run_inference(model, req: dict, default_export_format: str) -> None:
         image=image_paths,
         export_dir=export_dir,
         export_format=export_format,
+        batch_size=batch_size,
     )
 
 
@@ -79,6 +81,7 @@ def serve(
     timeout_s: int,
     max_bytes: int,
     debug: bool,
+    batch_size: int,
 ) -> None:
     print(f"[setup] Loading model '{model_id}' on cuda:{device_no}...")
     model = _load_model(model_id, device_no)
@@ -96,7 +99,7 @@ def serve(
                 try:
                     req = _recv_json(conn, max_bytes=max_bytes, timeout_s=timeout_s)
                     _validate_request(req)
-                    _run_inference(model, req, default_export_format=export_format)
+                    _run_inference(model, req, default_export_format=export_format, default_batch_size=batch_size)
                     elapsed_ms = int((time.time() - start) * 1000)
                     _send_json(
                         conn,
@@ -157,6 +160,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Include traceback in error responses.",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Default frame batch size for model inference.",
+    )
     return parser.parse_args(argv)
 
 
@@ -171,6 +180,7 @@ def main() -> int:
         timeout_s=args.timeout_s,
         max_bytes=args.max_bytes,
         debug=args.debug,
+        batch_size=args.batch_size,
     )
     return 0
 

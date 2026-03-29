@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export PYTHONUNBUFFERED=1
-exec python da3_remote_pipeline.py "$@"
+if [ -n "${DA3_ENV_PYTHON:-}" ]; then
+  exec "$DA3_ENV_PYTHON" da3_remote_pipeline.py "$@"
+fi
+exec python3 da3_remote_pipeline.py "$@"

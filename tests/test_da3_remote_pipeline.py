@@ -32,6 +32,7 @@ class RemotePipelineSessionTest(unittest.TestCase):
                         "manifest_path": str(manifest_path),
                         "worker_count": 2,
                         "transport": "fare-drive",
+                        "inference_batch_size": 24,
                     }
                 ),
                 encoding="utf-8",
@@ -43,6 +44,7 @@ class RemotePipelineSessionTest(unittest.TestCase):
         self.assertEqual(session["tasks"][0]["status"], "pending")
         self.assertEqual(sorted(session["workers"]), ["worker_a", "worker_b"])
         self.assertEqual(session["transport"], "fare-drive")
+        self.assertEqual(session["inference_batch_size"], 24)
 
 
 if __name__ == "__main__":

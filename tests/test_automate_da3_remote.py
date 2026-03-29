@@ -20,6 +20,7 @@ class ResolveConfigTest(unittest.TestCase):
                         "password": "secret",
                         "worker_count": 4,
                         "transport": "fare-drive",
+                        "inference_batch_size": 32,
                     }
                 ),
                 encoding="utf-8",
@@ -40,6 +41,7 @@ class ResolveConfigTest(unittest.TestCase):
         self.assertEqual(cfg["port"], 2200)
         self.assertEqual(cfg["worker_count"], 4)
         self.assertEqual(cfg["transport"], "fare-drive")
+        self.assertEqual(cfg["inference_batch_size"], 32)
 
 
 if __name__ == "__main__":

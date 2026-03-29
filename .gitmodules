@@ -1,0 +1,6 @@
+[submodule "│"]
+	path = │
+	url = https://github.com/hamimmahmud0/Fare-Drive.git
+[submodule "Fare-Drive"]
+	path = Fare-Drive
+	url = https://github.com/hamimmahmud0/Fare-Drive.git

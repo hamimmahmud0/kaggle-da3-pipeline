@@ -30,15 +30,15 @@ ENV_KEYS = {
     "remote_workspace": "DA3_REMOTE_WORKSPACE",
     "remote_miniforge": "DA3_REMOTE_MINIFORGE",
     "remote_env_name": "DA3_REMOTE_ENV_NAME",
-    "remote_fare_drive_root": "DA3_REMOTE_FARE_DRIVE_ROOT",
-    "remote_fare_drive_port": "DA3_REMOTE_FARE_DRIVE_PORT",
-    "remote_fare_drive_username": "DA3_REMOTE_FARE_DRIVE_USERNAME",
-    "remote_fare_drive_password": "DA3_REMOTE_FARE_DRIVE_PASSWORD",
-    "remote_fare_drive_storage_limit_gb": "DA3_REMOTE_FARE_DRIVE_STORAGE_LIMIT_GB",
+    "remote_fare_drive_client_home": "DA3_REMOTE_FARE_DRIVE_CLIENT_HOME",
+    "local_fare_drive_endpoint": "DA3_LOCAL_FARE_DRIVE_ENDPOINT",
+    "local_fare_drive_access_token": "DA3_LOCAL_FARE_DRIVE_ACCESS_TOKEN",
+    "local_fare_drive_upload_root": "DA3_LOCAL_FARE_DRIVE_UPLOAD_ROOT",
     "transport": "DA3_TRANSPORT",
     "drive_folder_url": "DA3_DRIVE_FOLDER_URL",
     "manifest_path": "DA3_MANIFEST_PATH",
     "worker_count": "DA3_WORKER_COUNT",
+    "inference_batch_size": "DA3_INFERENCE_BATCH_SIZE",
 }
 
 DEFAULTS = {
@@ -48,14 +48,14 @@ DEFAULTS = {
     "remote_workspace": "/kaggle/working/DA3",
     "remote_miniforge": "/kaggle/working/miniforge3",
     "remote_env_name": "da3-remote",
-    "remote_fare_drive_root": "/kaggle/working/DA3/fare-drive-server",
-    "remote_fare_drive_port": 8876,
-    "remote_fare_drive_username": "manager",
-    "remote_fare_drive_password": "manager-pass",
-    "remote_fare_drive_storage_limit_gb": 25,
-    "transport": "mega",
+    "remote_fare_drive_client_home": "/kaggle/working/DA3/.fare-drive-client",
+    "local_fare_drive_endpoint": "",
+    "local_fare_drive_access_token": "",
+    "local_fare_drive_upload_root": "da3-output",
+    "transport": "fare-drive",
     "manifest_path": "",
     "worker_count": 2,
+    "inference_batch_size": 16,
 }
 
 
@@ -103,28 +103,46 @@ class RemoteRunner:
             raise RemoteError(f"remote command failed ({code})\nSTDOUT:\n{out}\nSTDERR:\n{err}")
         return code, out, err
 
+    def _stream_bytes(self, script: str, payload: bytes, timeout: int = 3600) -> tuple[int, str, str]:
+        command = "bash -lc " + shlex.quote(script)
+        stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+        stdin.write(payload)
+        stdin.flush()
+        stdin.channel.shutdown_write()
+        out = stdout.read().decode("utf-8", "replace")
+        err = stderr.read().decode("utf-8", "replace")
+        code = stdout.channel.recv_exit_status()
+        if code != 0:
+            raise RemoteError(f"remote command failed ({code})\nSTDOUT:\n{out}\nSTDERR:\n{err}")
+        return code, out, err
+
     def write_text(self, remote_path: str, content: str, executable: bool = False) -> None:
         remote = PurePosixPath(remote_path)
-        self.bash(f"mkdir -p {shlex.quote(str(remote.parent))}", timeout=120)
-        sftp = self.client.open_sftp()
-        try:
-            with sftp.file(str(remote), "w") as handle:
-                handle.write(content)
-            if executable:
-                sftp.chmod(str(remote), 0o755)
-        finally:
-            sftp.close()
+        script = "\n".join(
+            [
+                f"mkdir -p {shlex.quote(str(remote.parent))}",
+                "python -c " + shlex.quote(
+                    "from pathlib import Path; import sys; Path(%r).write_bytes(sys.stdin.buffer.read())" % str(remote)
+                ),
+            ]
+        )
+        self._stream_bytes(script, content.encode("utf-8"), timeout=600)
+        if executable:
+            self.bash(f"chmod 755 {shlex.quote(str(remote))}", timeout=120)
 
     def upload_file(self, local_path: Path, remote_path: str, executable: bool = False) -> None:
         remote = PurePosixPath(remote_path)
-        self.bash(f"mkdir -p {shlex.quote(str(remote.parent))}", timeout=120)
-        sftp = self.client.open_sftp()
-        try:
-            sftp.put(str(local_path), str(remote))
-            if executable:
-                sftp.chmod(str(remote), 0o755)
-        finally:
-            sftp.close()
+        script = "\n".join(
+            [
+                f"mkdir -p {shlex.quote(str(remote.parent))}",
+                "python -c " + shlex.quote(
+                    "from pathlib import Path; import sys; Path(%r).write_bytes(sys.stdin.buffer.read())" % str(remote)
+                ),
+            ]
+        )
+        self._stream_bytes(script, local_path.read_bytes(), timeout=1800)
+        if executable:
+            self.bash(f"chmod 755 {shlex.quote(str(remote))}", timeout=120)
 
     def upload_tree(self, local_dir: Path, remote_dir: str) -> None:
         buffer = io.BytesIO()
@@ -133,27 +151,29 @@ class RemoteRunner:
         payload = buffer.getvalue()
         remote_parent = str(PurePosixPath(remote_dir).parent)
         remote_name = PurePosixPath(remote_dir).name
+        extract_code = """import io
+import shutil
+import sys
+import tarfile
+from pathlib import Path
+
+target_parent = Path(%r)
+target_name = %r
+target_parent.mkdir(parents=True, exist_ok=True)
+target = target_parent / target_name
+if target.exists():
+    shutil.rmtree(target)
+payload = sys.stdin.buffer.read()
+with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:
+    archive.extractall(target_parent)
+""" % (remote_parent, remote_name)
         script = "\n".join(
             [
                 f"mkdir -p {shlex.quote(remote_parent)}",
-                "python - <<'PY'",
-                "import io",
-                "import tarfile",
-                "from pathlib import Path",
-                f"payload = {payload!r}",
-                f"target_parent = Path({remote_parent!r})",
-                f"target_name = {remote_name!r}",
-                "target_parent.mkdir(parents=True, exist_ok=True)",
-                "target = target_parent / target_name",
-                "if target.exists():",
-                "    import shutil",
-                "    shutil.rmtree(target)",
-                "with tarfile.open(fileobj=io.BytesIO(payload), mode='r:gz') as archive:",
-                "    archive.extractall(target_parent)",
-                "PY",
+                "python -c " + shlex.quote(extract_code),
             ]
         )
-        self.bash(script, timeout=1800)
+        self._stream_bytes(script, payload, timeout=1800)
 
 
 def print_step(message: str) -> None:
@@ -204,19 +224,18 @@ def resolve_config(args: argparse.Namespace) -> dict:
             cfg[key] = value
 
     cfg["port"] = int(cfg["port"])
-    cfg["remote_fare_drive_port"] = int(cfg["remote_fare_drive_port"])
-    cfg["remote_fare_drive_storage_limit_gb"] = float(cfg["remote_fare_drive_storage_limit_gb"])
     cfg["worker_count"] = int(cfg["worker_count"])
+    cfg["inference_batch_size"] = int(cfg["inference_batch_size"])
 
     required_by_command = {
         "verify": ["password"],
-        "setup": ["password"],
+        "setup": ["password", "local_fare_drive_access_token"],
         "upload-pipeline": ["password"],
         "launch": ["password"],
         "status": ["password"],
         "datop": ["password"],
         "datalog": ["password"],
-        "full": ["password"],
+        "full": ["password", "local_fare_drive_access_token"],
     }
     missing = [key for key in required_by_command.get(args.command, []) if cfg.get(key) in (None, "")]
     if missing:
@@ -266,13 +285,24 @@ fi
 
 
 def upload_pipeline_assets(runner: RemoteRunner, cfg: dict) -> None:
-    print_step("Uploading DA3 runtime and Fare Drive sources")
+    print_step("Uploading DA3 runtime and preparing Fare Drive sources")
     workspace = PurePosixPath(cfg["remote_workspace"])
     runner.upload_file(REMOTE_PIPELINE_LOCAL, str(workspace / "da3_remote_pipeline.py"))
     runner.upload_file(REMOTE_LAUNCHER_LOCAL, str(workspace / "run_da3_pipeline.sh"), executable=True)
     runner.upload_file(REMOTE_INFERENCE_SERVER_LOCAL, str(workspace / "da3_inference_server.py"))
-    runner.upload_tree(FARE_DRIVE_LOCAL, str(workspace / "Fare-Drive"))
     runner.upload_file(ROOT / "environment.remote.yml", str(workspace / "environment.remote.yml"))
+    fare_drive_remote = posixpath.join(cfg["remote_workspace"], "Fare-Drive")
+    script = f"""
+set -e
+if [ ! -d {shlex.quote(posixpath.join(fare_drive_remote, '.git'))} ]; then
+  rm -rf {shlex.quote(fare_drive_remote)}
+  git clone https://github.com/hamimmahmud0/Fare-Drive.git {shlex.quote(fare_drive_remote)}
+else
+  git -C {shlex.quote(fare_drive_remote)} fetch --depth 1 origin
+  git -C {shlex.quote(fare_drive_remote)} reset --hard origin/main || git -C {shlex.quote(fare_drive_remote)} reset --hard origin/master
+fi
+"""
+    runner.bash(script, timeout=3600)
 
 
 def build_remote_env(runner: RemoteRunner, cfg: dict) -> None:
@@ -295,74 +325,24 @@ cd {shlex.quote(posixpath.join(workspace, 'Fare-Drive'))}
     runner.bash(script, timeout=7200)
 
 
-def ensure_remote_fare_drive(runner: RemoteRunner, cfg: dict) -> None:
-    print_step("Configuring remote Fare Drive server")
-    workspace = PurePosixPath(cfg["remote_workspace"])
+def configure_remote_fare_drive_client(runner: RemoteRunner, cfg: dict) -> None:
+    print_step("Configuring remote Fare Drive client")
     miniforge = cfg["remote_miniforge"]
     env_name = cfg["remote_env_name"]
-    fare_root = cfg["remote_fare_drive_root"]
-    fare_port = cfg["remote_fare_drive_port"]
-    username = cfg["remote_fare_drive_username"]
-    password = cfg["remote_fare_drive_password"]
-    storage_limit = cfg["remote_fare_drive_storage_limit_gb"]
-    env_path = workspace / "fare-drive.env"
+    client_home = cfg["remote_fare_drive_client_home"]
+    access_token = cfg["local_fare_drive_access_token"]
     script = f"""
 set -e
 export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
 source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
-if [ ! -f {shlex.quote(posixpath.join(fare_root, '.fare-drive', 'server.json'))} ]; then
-  {shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} fare-drive server init \
-    --root {shlex.quote(fare_root)} \
-    --username {shlex.quote(username)} \
-    --password {shlex.quote(password)} \
-    --storage-limit-gb {shlex.quote(str(storage_limit))}
-fi
-cat > {shlex.quote(str(env_path))} <<'EOF'
-FARE_DRIVE_SERVER_ROOT={fare_root}
-FARE_DRIVE_SERVER_HOST=127.0.0.1
-FARE_DRIVE_SERVER_PORT={fare_port}
-FARE_DRIVE_SERVER_PUBLIC_URL=http://127.0.0.1:{fare_port}
-FARE_DRIVE_SERVER_USERNAME={username}
-FARE_DRIVE_SERVER_PASSWORD={password}
-FARE_DRIVE_SERVER_STORAGE_LIMIT_GB={storage_limit}
-EOF
+mkdir -p {shlex.quote(client_home)}
+HOME={shlex.quote(client_home)} {shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} \
+  fare-drive client login-token --access-token {shlex.quote(access_token)}
 """
     runner.bash(script, timeout=1800)
 
 
-def start_remote_fare_drive(runner: RemoteRunner, cfg: dict) -> str:
-    print_step("Starting remote Fare Drive server")
-    workspace = PurePosixPath(cfg["remote_workspace"])
-    miniforge = cfg["remote_miniforge"]
-    env_name = cfg["remote_env_name"]
-    fare_root = cfg["remote_fare_drive_root"]
-    fare_port = cfg["remote_fare_drive_port"]
-    env_path = workspace / "fare-drive.env"
-    log_path = workspace / "logs" / "fare-drive.log"
-    token_path = workspace / "fare-drive-access-token.txt"
-    script = f"""
-set -e
-export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
-source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
-if ! (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true) | grep -q ':{fare_port} '; then
-  nohup {shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} \
-    env $(cat {shlex.quote(str(env_path))} | xargs) \
-    fare-drive server run --root {shlex.quote(fare_root)} --host 127.0.0.1 --port {fare_port} --public-url http://127.0.0.1:{fare_port} --no-start-tunnel \
-    > {shlex.quote(str(log_path))} 2>&1 &
-  sleep 2
-fi
-{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} \
-  fare-drive server issue-access-token --root {shlex.quote(fare_root)} --endpoint http://127.0.0.1:{fare_port} --expires-in 604800 \
-  | tee {shlex.quote(str(token_path))}
-"""
-    _, out, _ = runner.bash(script, timeout=1800)
-    token = out.strip().splitlines()[-1].strip()
-    if not token:
-        raise RemoteError("Failed to obtain Fare Drive access token from remote host.")
-    return token
-
-
-def initialize_remote_session(runner: RemoteRunner, cfg: dict, access_token: str) -> None:
+def initialize_remote_session(runner: RemoteRunner, cfg: dict) -> None:
     print_step("Initializing remote DA3 session state")
     workspace = cfg["remote_workspace"]
     miniforge = cfg["remote_miniforge"]
@@ -372,10 +352,12 @@ def initialize_remote_session(runner: RemoteRunner, cfg: dict, access_token: str
         "drive_folder_url": cfg.get("drive_folder_url", ""),
         "manifest_path": cfg.get("manifest_path", ""),
         "worker_count": cfg["worker_count"],
+        "inference_batch_size": cfg["inference_batch_size"],
         "fare_drive": {
-            "endpoint": f"http://127.0.0.1:{cfg['remote_fare_drive_port']}",
-            "access_token_path": str(PurePosixPath(workspace) / "fare-drive-access-token.txt"),
-            "local_access_token": access_token,
+            "endpoint": cfg["local_fare_drive_endpoint"],
+            "access_token": cfg["local_fare_drive_access_token"],
+            "client_home": cfg["remote_fare_drive_client_home"],
+            "upload_root": cfg["local_fare_drive_upload_root"],
         },
     }
     remote_config_path = str(PurePosixPath(workspace) / "remote-session-config.json")
@@ -395,7 +377,14 @@ cd {shlex.quote(workspace)}
 def launch_remote_pipeline(runner: RemoteRunner, cfg: dict) -> None:
     print_step("Launching remote DA3 workers")
     workspace = cfg["remote_workspace"]
-    script = f"cd {shlex.quote(workspace)} && ./run_da3_pipeline.sh launch --workspace {shlex.quote(workspace)}"
+    miniforge = cfg["remote_miniforge"]
+    env_name = cfg["remote_env_name"]
+    env_python = posixpath.join(miniforge, 'envs', env_name, 'bin', 'python')
+    script = f"""
+set -e
+cd {shlex.quote(workspace)}
+DA3_ENV_PYTHON={shlex.quote(env_python)} ./run_da3_pipeline.sh launch --workspace {shlex.quote(workspace)}
+"""
     runner.bash(script, timeout=300)
 
 
@@ -448,10 +437,9 @@ def command_setup(args: argparse.Namespace) -> None:
         bootstrap_remote_miniforge(runner, cfg)
         upload_pipeline_assets(runner, cfg)
         build_remote_env(runner, cfg)
-        ensure_remote_fare_drive(runner, cfg)
-        token = start_remote_fare_drive(runner, cfg)
-        initialize_remote_session(runner, cfg, token)
-        print(f"Remote Fare Drive access token: {token}")
+        configure_remote_fare_drive_client(runner, cfg)
+        initialize_remote_session(runner, cfg)
+        print(f"Remote Fare Drive client is configured for {cfg['local_fare_drive_endpoint']}")
 
 
 def command_upload_pipeline(args: argparse.Namespace) -> None:

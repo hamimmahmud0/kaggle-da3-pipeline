@@ -1,0 +1,33 @@
+==> logs/worker_a.log <==
+Traceback (most recent call last):
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 407, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 402, in main
+    args.handler(args)
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 358, in handle_worker
+    raise SystemExit(worker_loop(Path(args.workspace), args.worker_name))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 256, in worker_loop
+    wait_for_port("127.0.0.1", backend_port, timeout=120.0)
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 221, in wait_for_port
+    raise RuntimeError(f"Timed out waiting for backend server on {host}:{port}")
+RuntimeError: Timed out waiting for backend server on 127.0.0.1:8008
+
+==> logs/worker_b.log <==
+Traceback (most recent call last):
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 407, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 402, in main
+    args.handler(args)
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 358, in handle_worker
+    raise SystemExit(worker_loop(Path(args.workspace), args.worker_name))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 256, in worker_loop
+    wait_for_port("127.0.0.1", backend_port, timeout=120.0)
+  File "/kaggle/working/DA3/da3_remote_pipeline.py", line 221, in wait_for_port
+    raise RuntimeError(f"Timed out waiting for backend server on {host}:{port}")
+RuntimeError: Timed out waiting for backend server on 127.0.0.1:8009
+
+==> logs/fare-drive.log <==

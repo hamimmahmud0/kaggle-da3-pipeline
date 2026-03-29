@@ -90,6 +90,8 @@ def build_tasks_from_manifest(manifest_path: str) -> list[dict]:
                 "started_at": None,
                 "completed_at": None,
                 "elapsed_ms": None,
+                "uploaded_at": None,
+                "uploaded_path": None,
                 "last_error": None,
             }
         )
@@ -107,6 +109,7 @@ def init_session(workspace: Path, config_file: str | None = None) -> dict:
         "workspace": str(workspace),
         "transport": config.get("transport", "mega"),
         "drive_folder_url": config.get("drive_folder_url", ""),
+        "inference_batch_size": int(config.get("inference_batch_size", 16)),
         "fare_drive": config.get("fare_drive", {}),
         "tasks": tasks,
         "workers": {
@@ -196,7 +199,7 @@ def backend_script(workspace: Path, worker_name: str, device_no: int, port: int)
     backend_log = paths["logs"] / f"backend_{worker_name}.log"
     return (
         f"cd {shlex_quote(str(workspace))} && "
-        f"PYTHONUNBUFFERED=1 python da3_inference_server.py --device-no {device_no} --port {port} "
+        f"PYTHONUNBUFFERED=1 {shlex_quote(sys.executable)} da3_inference_server.py --device-no {device_no} --port {port} "
         f">> {shlex_quote(str(backend_log))} 2>&1"
     )
 
@@ -239,6 +242,28 @@ def send_inference_request(host: str, port: int, payload: dict, timeout_s: int =
     return json.loads(response.splitlines()[0])
 
 
+def upload_artifacts_via_fare_drive(workspace: Path, session: dict, task: dict) -> str:
+    fare_drive = session.get("fare_drive", {})
+    client_home = fare_drive.get("client_home", "")
+    upload_root = fare_drive.get("upload_root", "da3-output").strip("/")
+    output_dir = workspace / "output" / str(task["video_name"]) / str(task["file_name"])
+    if not output_dir.exists():
+        raise RuntimeError(f"Expected output directory is missing: {output_dir}")
+    remote_path = "/".join(part for part in [upload_root, str(task["video_name"]), str(task["file_name"])] if part)
+    env = os.environ.copy()
+    if client_home:
+        env["HOME"] = client_home
+    command = [sys.executable, "-m", "fare_drive.cli", "client", "put", str(output_dir), "--remote-path", remote_path]
+    proc = subprocess.run(command, cwd=workspace, env=env, text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fare-drive client put failed for {output_dir}.\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}"
+        )
+    return remote_path
+
+
 def worker_loop(workspace: Path, worker_name: str) -> int:
     paths = ensure_workspace(workspace)
     session = read_session(workspace)
@@ -253,7 +278,29 @@ def worker_loop(workspace: Path, worker_name: str) -> int:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    wait_for_port("127.0.0.1", backend_port, timeout=120.0)
+    backend_log = Path(worker["backend_log_path"])
+    startup_deadline = time.time() + 120.0
+    while True:
+        if backend_process.poll() is not None:
+            log_tail = ""
+            if backend_log.exists():
+                log_tail = backend_log.read_text(encoding="utf-8", errors="replace")[-4000:]
+            raise RuntimeError(
+                f"Backend process exited before opening port {backend_port}.\n"
+                f"Backend log tail:\n{log_tail}"
+            )
+        try:
+            wait_for_port("127.0.0.1", backend_port, timeout=1.0)
+            break
+        except RuntimeError:
+            if time.time() >= startup_deadline:
+                log_tail = ""
+                if backend_log.exists():
+                    log_tail = backend_log.read_text(encoding="utf-8", errors="replace")[-4000:]
+                raise RuntimeError(
+                    f"Timed out waiting for backend server on 127.0.0.1:{backend_port}.\n"
+                    f"Backend log tail:\n{log_tail}"
+                )
 
     try:
         while True:
@@ -275,14 +322,22 @@ def worker_loop(workspace: Path, worker_name: str) -> int:
                         "video_name": task["video_name"],
                         "file_name": task["file_name"],
                         "export_format": task.get("export_format", "glb-npz"),
+                        "batch_size": int(session.get("inference_batch_size", 16)),
                     },
                 )
                 if response.get("status") != "success":
                     raise RuntimeError(response.get("message", "Unknown inference error"))
                 elapsed_ms = int((time.time() - started) * 1000)
+                session = read_session(workspace)
+                uploaded_path = upload_artifacts_via_fare_drive(workspace, session, task)
                 with session_lock(paths["lock"]):
                     session = read_session(workspace)
                     heartbeat(session, worker_name, os.getpid())
+                    for item in session.get("tasks", []):
+                        if item.get("id") == task["id"]:
+                            item["uploaded_path"] = uploaded_path
+                            item["uploaded_at"] = iso_now()
+                            break
                     complete_task(session, worker_name, task["id"], elapsed_ms=elapsed_ms)
                     save_session(workspace, session)
             except Exception as exc:
@@ -334,7 +389,10 @@ def status_payload(workspace: Path) -> dict:
     fare_drive_status = "unknown"
     fare_drive = session.get("fare_drive", {})
     endpoint = fare_drive.get("endpoint", "")
-    if endpoint:
+    client_home = fare_drive.get("client_home", "")
+    if endpoint and client_home:
+        fare_drive_status = f"client:{endpoint}"
+    elif endpoint:
         fare_drive_status = f"configured:{endpoint}"
     return {
         "workspace": str(workspace),
@@ -363,8 +421,10 @@ def handle_status(args: argparse.Namespace) -> None:
     if args.json:
         print(json.dumps(payload, indent=2))
         return
-    summary = payload.get("session", {}).get("summary", {})
+    session = payload.get("session", {})
+    summary = session.get("summary", {})
     print(f"Workspace: {payload['workspace']}")
+    print(f"Inference batch size: {session.get('inference_batch_size', 'unknown')}")
     print(f"Pending: {summary.get('pending', 0)}")
     print(f"Running: {summary.get('running', 0)}")
     print(f"Completed: {summary.get('completed', 0)}")
