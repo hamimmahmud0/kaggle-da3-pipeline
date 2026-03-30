@@ -21,6 +21,7 @@ REMOTE_LAUNCHER_LOCAL = ROOT / "run_da3_pipeline.sh"
 REMOTE_INFERENCE_SERVER_LOCAL = ROOT / "da3_inference_server.py"
 FARE_DRIVE_LOCAL = ROOT / "Fare-Drive"
 DEFAULT_CONFIG_FILE = ROOT / "da3_remote.sample.json"
+DEPTH_ANYTHING_REPO_URL = "https://github.com/ByteDance-Seed/Depth-Anything-3.git"
 
 ENV_KEYS = {
     "host": "DA3_HOST",
@@ -33,12 +34,15 @@ ENV_KEYS = {
     "remote_fare_drive_client_home": "DA3_REMOTE_FARE_DRIVE_CLIENT_HOME",
     "local_fare_drive_endpoint": "DA3_LOCAL_FARE_DRIVE_ENDPOINT",
     "local_fare_drive_access_token": "DA3_LOCAL_FARE_DRIVE_ACCESS_TOKEN",
+    "local_fare_drive_input_root": "DA3_LOCAL_FARE_DRIVE_INPUT_ROOT",
     "local_fare_drive_upload_root": "DA3_LOCAL_FARE_DRIVE_UPLOAD_ROOT",
     "transport": "DA3_TRANSPORT",
     "drive_folder_url": "DA3_DRIVE_FOLDER_URL",
     "manifest_path": "DA3_MANIFEST_PATH",
     "worker_count": "DA3_WORKER_COUNT",
     "inference_batch_size": "DA3_INFERENCE_BATCH_SIZE",
+    "video_frame_task_size": "DA3_VIDEO_FRAME_TASK_SIZE",
+    "export_format": "DA3_EXPORT_FORMAT",
 }
 
 DEFAULTS = {
@@ -51,11 +55,14 @@ DEFAULTS = {
     "remote_fare_drive_client_home": "/kaggle/working/DA3/.fare-drive-client",
     "local_fare_drive_endpoint": "",
     "local_fare_drive_access_token": "",
+    "local_fare_drive_input_root": "",
     "local_fare_drive_upload_root": "da3-output",
     "transport": "fare-drive",
     "manifest_path": "",
     "worker_count": 2,
     "inference_batch_size": 16,
+    "video_frame_task_size": 16,
+    "export_format": "npz",
 }
 
 
@@ -226,6 +233,7 @@ def resolve_config(args: argparse.Namespace) -> dict:
     cfg["port"] = int(cfg["port"])
     cfg["worker_count"] = int(cfg["worker_count"])
     cfg["inference_batch_size"] = int(cfg["inference_batch_size"])
+    cfg["video_frame_task_size"] = int(cfg["video_frame_task_size"])
 
     required_by_command = {
         "verify": ["password"],
@@ -305,24 +313,37 @@ fi
     runner.bash(script, timeout=3600)
 
 
-def build_remote_env(runner: RemoteRunner, cfg: dict) -> None:
-    print_step("Creating or updating the remote conda environment")
+def build_remote_env_script(cfg: dict) -> str:
     miniforge = cfg["remote_miniforge"]
     workspace = cfg["remote_workspace"]
     env_name = cfg["remote_env_name"]
-    script = f"""
+    depth_anything_remote = posixpath.join(workspace, "Depth-Anything-3")
+    return f"""
 set -e
 export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
 source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
 if ! {shlex.quote(miniforge)}/micromamba env list | grep -q '/envs/{shlex.quote(env_name).strip(chr(39))}$'; then
   {shlex.quote(miniforge)}/micromamba create -y -n {shlex.quote(env_name)} python=3.12 pip
 fi
-{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install --upgrade pip setuptools wheel
-{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install psutil
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install --no-cache-dir psutil gdown
+if [ ! -d {shlex.quote(posixpath.join(depth_anything_remote, '.git'))} ]; then
+  rm -rf {shlex.quote(depth_anything_remote)}
+  git clone --depth 1 {shlex.quote(DEPTH_ANYTHING_REPO_URL)} {shlex.quote(depth_anything_remote)}
+else
+  git -C {shlex.quote(depth_anything_remote)} fetch --depth 1 origin
+  git -C {shlex.quote(depth_anything_remote)} reset --hard origin/main
+fi
+cd {shlex.quote(depth_anything_remote)}
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install --no-cache-dir -e .
 cd {shlex.quote(posixpath.join(workspace, 'Fare-Drive'))}
-{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install -e .
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python -m pip install --no-cache-dir -e .
 """
-    runner.bash(script, timeout=7200)
+
+
+def build_remote_env(runner: RemoteRunner, cfg: dict) -> None:
+    print_step("Creating or updating the remote conda environment")
+    runner.bash(build_remote_env_script(cfg), timeout=7200)
 
 
 def configure_remote_fare_drive_client(runner: RemoteRunner, cfg: dict) -> None:
@@ -342,32 +363,77 @@ HOME={shlex.quote(client_home)} {shlex.quote(miniforge)}/micromamba run -n {shle
     runner.bash(script, timeout=1800)
 
 
-def initialize_remote_session(runner: RemoteRunner, cfg: dict) -> None:
-    print_step("Initializing remote DA3 session state")
-    workspace = cfg["remote_workspace"]
-    miniforge = cfg["remote_miniforge"]
-    env_name = cfg["remote_env_name"]
-    session_config = {
+def build_remote_session_config(cfg: dict) -> dict:
+    return {
         "transport": cfg["transport"],
         "drive_folder_url": cfg.get("drive_folder_url", ""),
         "manifest_path": cfg.get("manifest_path", ""),
         "worker_count": cfg["worker_count"],
         "inference_batch_size": cfg["inference_batch_size"],
+        "video_frame_task_size": cfg["video_frame_task_size"],
+        "export_format": cfg["export_format"],
         "fare_drive": {
             "endpoint": cfg["local_fare_drive_endpoint"],
             "access_token": cfg["local_fare_drive_access_token"],
             "client_home": cfg["remote_fare_drive_client_home"],
+            "input_root": cfg.get("local_fare_drive_input_root", ""),
             "upload_root": cfg["local_fare_drive_upload_root"],
         },
     }
+
+
+def write_remote_session_config(runner: RemoteRunner, cfg: dict) -> str:
+    workspace = cfg["remote_workspace"]
     remote_config_path = str(PurePosixPath(workspace) / "remote-session-config.json")
-    runner.write_text(remote_config_path, json.dumps(session_config, indent=2) + "\n")
+    runner.write_text(remote_config_path, json.dumps(build_remote_session_config(cfg), indent=2) + "\n")
+    return remote_config_path
+
+
+def initialize_remote_session(runner: RemoteRunner, cfg: dict) -> None:
+    print_step("Initializing remote DA3 session state")
+    workspace = cfg["remote_workspace"]
+    miniforge = cfg["remote_miniforge"]
+    env_name = cfg["remote_env_name"]
+    remote_config_path = write_remote_session_config(runner, cfg)
     script = f"""
 set -e
 export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
 source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
 cd {shlex.quote(workspace)}
 {shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python da3_remote_pipeline.py init-session \
+  --workspace {shlex.quote(workspace)} \
+  --config-file {shlex.quote(remote_config_path)}
+"""
+    runner.bash(script, timeout=1800)
+
+
+def sync_remote_session_config(runner: RemoteRunner, cfg: dict) -> None:
+    print_step("Syncing remote session config")
+    workspace = cfg["remote_workspace"]
+    miniforge = cfg["remote_miniforge"]
+    env_name = cfg["remote_env_name"]
+    remote_config_path = write_remote_session_config(runner, cfg)
+    session_config = {
+        "batch_size": cfg["inference_batch_size"],
+        "video_frame_task_size": cfg["video_frame_task_size"],
+        "export_format": cfg["export_format"],
+        "input_root": cfg.get("local_fare_drive_input_root", ""),
+        "upload_root": cfg["local_fare_drive_upload_root"],
+    }
+    print(
+        "Applying session settings: "
+        f"batch_size={session_config['batch_size']} "
+        f"video_frame_task_size={session_config['video_frame_task_size']} "
+        f"export_format={session_config['export_format']} "
+        f"fare_drive_input_root={session_config['input_root'] or '-'} "
+        f"fare_drive_upload_root={session_config['upload_root']}"
+    )
+    script = f"""
+set -e
+export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
+source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
+cd {shlex.quote(workspace)}
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python da3_remote_pipeline.py update-session-config \
   --workspace {shlex.quote(workspace)} \
   --config-file {shlex.quote(remote_config_path)}
 """
@@ -452,6 +518,7 @@ def command_upload_pipeline(args: argparse.Namespace) -> None:
 def command_launch(args: argparse.Namespace) -> None:
     cfg = resolve_config(args)
     with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
+        sync_remote_session_config(runner, cfg)
         launch_remote_pipeline(runner, cfg)
         print_status(runner, cfg)
 
@@ -501,14 +568,19 @@ def command_datop(args: argparse.Namespace) -> None:
             time.sleep(args.refresh_seconds)
 
 
+def build_datalog_tail_script(workspace: str, lines: int) -> str:
+    return (
+        f"cd {shlex.quote(workspace)} && "
+        f"tail -n {int(lines)} -F "
+        f"logs/pipeline.log logs/worker_a.log logs/worker_b.log "
+        f"logs/backend_worker_a.log logs/backend_worker_b.log logs/fare-drive.log"
+    )
+
+
 def command_datalog(args: argparse.Namespace) -> None:
     cfg = resolve_config(args)
     with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
-        workspace = cfg["remote_workspace"]
-        script = (
-            f"cd {shlex.quote(workspace)} && "
-            f"tail -n {int(args.lines)} -F logs/pipeline.log logs/worker_a.log logs/worker_b.log logs/fare-drive.log"
-        )
+        script = build_datalog_tail_script(cfg["remote_workspace"], int(args.lines))
         transport = runner.client.get_transport()
         if transport is None:
             raise RemoteError("SSH transport is not available.")

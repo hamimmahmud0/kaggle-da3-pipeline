@@ -1,10 +1,13 @@
 import argparse
+import inspect
 import json
 import os
 import socket
 import sys
 import time
 import traceback
+
+DEFAULT_EXPORT_FORMAT = "npz"
 
 
 def _load_model(model_id: str, device_no: int):
@@ -63,13 +66,33 @@ def _run_inference(model, req: dict, default_export_format: str, default_batch_s
 
     export_dir = os.path.join("output", str(video_name), str(file_name))
     os.makedirs(export_dir, exist_ok=True)
-
-    model.inference(
-        image=image_paths,
-        export_dir=export_dir,
-        export_format=export_format,
-        batch_size=batch_size,
+    print(
+        f"[request] file={file_name} frames={len(image_paths)} batch_size={batch_size} export_format={export_format}",
+        flush=True,
     )
+
+    inference_kwargs = {
+        "image": image_paths,
+        "export_dir": export_dir,
+        "export_format": export_format,
+    }
+    try:
+        signature = inspect.signature(model.inference)
+    except (TypeError, ValueError):
+        signature = None
+    supports_batch_size = signature is None or "batch_size" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in (signature.parameters.values() if signature else [])
+    )
+    if supports_batch_size:
+        inference_kwargs["batch_size"] = batch_size
+
+    try:
+        model.inference(**inference_kwargs)
+    except TypeError as exc:
+        if "batch_size" not in inference_kwargs or "batch_size" not in str(exc):
+            raise
+        inference_kwargs.pop("batch_size", None)
+        model.inference(**inference_kwargs)
 
 
 def serve(
@@ -140,7 +163,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--export-format",
-        default="glb-npz",
+        default=DEFAULT_EXPORT_FORMAT,
         help="Default export format if not provided by client.",
     )
     parser.add_argument(

@@ -1,0 +1,7 @@
+PID TTY          TIME CMD
+    1 ?        00:00:05 jupyter-server
+   55 ?        00:00:02 python3
+   58 ?        00:00:00 nvidia-smi
+   80 ?        00:00:05 python3
+  118 ?        00:00:00 bash
+  126 ?        00:00:00 ps

@@ -18,13 +18,13 @@ This repository is a manager/worker version of the DA3 pipeline, modeled after `
 
 The local PC acts as the manager and hosts the `Fare-Drive` server.
 
-The remote notebook or server acts as a `Fare-Drive` client only. It logs in with an access token from the local PC server, runs DA3 workers remotely, and uploads completed output directories back to the local PC with `fare-drive client put`.
+The remote notebook or server acts as a `Fare-Drive` client only. It logs in with an access token from the local PC server, can download inputs with `fare-drive client get`, runs DA3 workers remotely, and uploads completed output directories back to the local PC with `fare-drive client put`.
 
 The remote machine runs:
 
 - the DA3 worker runtime
 - one DA3 inference backend per worker
-- the `Fare-Drive` client for artifact uploads
+- the `Fare-Drive` client for input downloads and artifact uploads
 
 ## Quick Start
 
@@ -35,7 +35,7 @@ conda env create -f environment.local.yml
 conda activate da3-manager
 ```
 
-Start the `Fare-Drive` server on the local PC and issue an access token there. Then copy the sample config and fill in your values, including `inference_batch_size` for model frame batching:
+Start the `Fare-Drive` server on the local PC and issue an access token there. Then copy the sample config and fill in your values, including `inference_batch_size` for model frame batching, `video_frame_task_size` for per-task chunking, and `export_format` for artifact format selection:
 
 ```bash
 cp da3_remote.sample.json da3_remote.json
@@ -55,12 +55,15 @@ Example `da3_remote.json`:
   "remote_fare_drive_client_home": "/kaggle/working/DA3/.fare-drive-client",
   "local_fare_drive_endpoint": "http://YOUR_PC_HOST:8876",
   "local_fare_drive_access_token": "PASTE_PC_SERVER_ACCESS_TOKEN_HERE",
+  "local_fare_drive_input_root": "",
   "local_fare_drive_upload_root": "da3-output",
   "transport": "fare-drive",
   "drive_folder_url": "https://drive.google.com/drive/folders/1SWlrL2pjpM11mYTZAQCyLZJKjwdAGY76?usp=sharing",
   "manifest_path": "",
   "worker_count": 2,
-  "inference_batch_size": 16
+  "inference_batch_size": 16,
+  "video_frame_task_size": 16,
+  "export_format": "npz"
 }
 ```
 
@@ -88,6 +91,8 @@ Watch status or logs:
 ./datop --config-file da3_remote.json
 ./datalog --config-file da3_remote.json
 ```
+
+If `local_fare_drive_input_root` is set, the remote session downloads inputs from that Fare Drive path during `init-session`. If it is empty, the pipeline falls back to `manifest_path` or `drive_folder_url`.
 
 ## Tests
 

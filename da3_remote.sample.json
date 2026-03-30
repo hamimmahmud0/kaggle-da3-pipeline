@@ -2,17 +2,16 @@
   "host": "127.0.0.1",
   "port": 10022,
   "username": "notebook",
-  "password": "CHANGE_ME",
+  "password": "xH4oZTygUAf6dF4QI7sYBzLOBj62EAOI",
   "remote_workspace": "/kaggle/working/DA3",
   "remote_miniforge": "/kaggle/working/miniforge3",
   "remote_env_name": "da3-remote",
-  "remote_fare_drive_client_home": "/kaggle/working/DA3/.fare-drive-client",
-  "local_fare_drive_endpoint": "http://YOUR_PC_HOST:8876",
-  "local_fare_drive_access_token": "PASTE_PC_SERVER_ACCESS_TOKEN_HERE",
-  "local_fare_drive_upload_root": "da3-output",
   "transport": "fare-drive",
   "drive_folder_url": "https://drive.google.com/drive/folders/1SWlrL2pjpM11mYTZAQCyLZJKjwdAGY76?usp=sharing",
   "manifest_path": "",
   "worker_count": 2,
-  "inference_batch_size": 16
+  "inference_batch_size": 7,
+  "video_frame_task_size": 16,
+  "export_format": "npz",
+  "local_fare_drive_access_token":"eyJlbmRwb2ludCI6Imh0dHBzOi8vYXBpLnRyeWNsb3VkZmxhcmUuY29tL3R1bm5lbFwiOiIsImV4cCI6MTc3NDg1MDg1NywidHlwZSI6ImVuZHBvaW50In0.Vqqz9gzBrwr5YgxfhhciasRnTBFS1Qe734RPw4GEV_0"
 }
