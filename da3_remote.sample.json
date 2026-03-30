@@ -10,8 +10,8 @@
   "drive_folder_url": "https://drive.google.com/drive/folders/1SWlrL2pjpM11mYTZAQCyLZJKjwdAGY76?usp=sharing",
   "manifest_path": "",
   "worker_count": 2,
-  "inference_batch_size": 7,
-  "video_frame_task_size": 16,
-  "export_format": "npz",
-  "local_fare_drive_access_token":"eyJlbmRwb2ludCI6Imh0dHBzOi8vYXBpLnRyeWNsb3VkZmxhcmUuY29tL3R1bm5lbFwiOiIsImV4cCI6MTc3NDg1MDg1NywidHlwZSI6ImVuZHBvaW50In0.Vqqz9gzBrwr5YgxfhhciasRnTBFS1Qe734RPw4GEV_0"
+  "inference_batch_size": 16,
+  "video_frame_task_size": 4,
+  "export_format": "glb",
+  "local_fare_drive_access_token":"eyJlbmRwb2ludCI6Imh0dHBzOi8vcG93ZXJmdWwtZWZmZWN0LWxvY2tlZC1wZW5ndWluLnRyeWNsb3VkZmxhcmUuY29tIiwiZXhwIjoxMDAwMDE3NzQ4NTIwMjgsInR5cGUiOiJlbmRwb2ludCJ9.rnDXZ4mHZt8DAv8EGmujOLi8SZG12hynSW5doFyW2rg"
 }
