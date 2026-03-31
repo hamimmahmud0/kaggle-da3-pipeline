@@ -4,7 +4,7 @@ This repository is a manager/worker version of the DA3 pipeline, modeled after `
 
 ## What Is Here
 
-- `automate_da3_remote.py`: local control plane for SSH setup, remote bootstrap, launch, `datop`, and `datalog`
+- `automate_da3_remote.py`: local control plane for SSH setup, remote bootstrap, launch, failed-task retry, `datop`, and `datalog`
 - `da3_remote_pipeline.py`: remote session runtime with worker state, task claiming, and output uploads
 - `da3_inference_server.py`: per-GPU inference backend used by the remote workers
 - `run_da3_pipeline.sh`: remote launcher wrapper
@@ -91,6 +91,14 @@ Watch status or logs:
 ./datop --config-file da3_remote.json
 ./datalog --config-file da3_remote.json
 ```
+
+Retry only the failed tasks without reinitializing the whole session:
+
+```bash
+python automate_da3_remote.py retry-failed --config-file da3_remote.json
+```
+
+This resets failed tasks back to `pending`, clears their previous error metadata, and leaves completed tasks untouched.
 
 If `local_fare_drive_input_root` is set, the remote session downloads inputs from that Fare Drive path during `init-session`. If it is empty, the pipeline falls back to `manifest_path` or `drive_folder_url`.
 

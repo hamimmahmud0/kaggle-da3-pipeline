@@ -414,6 +414,47 @@ class RemotePipelineSessionTest(unittest.TestCase):
         self.assertIsNone(updated["tasks"][0]["started_at"])
         self.assertEqual(updated["tasks"][1]["status"], "running")
 
+    def test_retry_failed_tasks_requeues_failures_and_clears_error_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir) / "workspace"
+            module.ensure_workspace(workspace)
+            module.save_json(
+                module.workspace_paths(workspace)["session"],
+                {
+                    "tasks": [
+                        {
+                            "id": "task-1",
+                            "status": "failed",
+                            "claimed_by": "worker_a",
+                            "started_at": "2026-01-01T00:00:00Z",
+                            "completed_at": "2026-01-01T00:01:00Z",
+                            "elapsed_ms": 60000,
+                            "last_error": "boom",
+                        },
+                        {
+                            "id": "task-2",
+                            "status": "completed",
+                            "claimed_by": "worker_b",
+                            "completed_at": "2026-01-01T00:02:00Z",
+                        },
+                    ],
+                    "workers": {},
+                    "summary": {"pending": 0, "running": 0, "completed": 1, "failed": 1, "total": 2},
+                },
+            )
+
+            updated = module.retry_failed_tasks(workspace)
+
+        self.assertEqual(updated["summary"]["pending"], 1)
+        self.assertEqual(updated["summary"]["failed"], 0)
+        self.assertEqual(updated["tasks"][0]["status"], "pending")
+        self.assertIsNone(updated["tasks"][0]["claimed_by"])
+        self.assertIsNone(updated["tasks"][0]["started_at"])
+        self.assertIsNone(updated["tasks"][0]["completed_at"])
+        self.assertIsNone(updated["tasks"][0]["elapsed_ms"])
+        self.assertIsNone(updated["tasks"][0]["last_error"])
+        self.assertEqual(updated["tasks"][1]["status"], "completed")
+
     def test_prepare_video_for_frame_extraction_rebuilds_invalid_sidecar_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             video_path = Path(tempdir) / "clip.dav"

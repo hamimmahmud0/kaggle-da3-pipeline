@@ -469,6 +469,20 @@ cd {shlex.quote(workspace)}
     return out.strip()
 
 
+def retry_failed_remote_tasks(runner: RemoteRunner, cfg: dict) -> None:
+    workspace = cfg["remote_workspace"]
+    miniforge = cfg["remote_miniforge"]
+    env_name = cfg["remote_env_name"]
+    script = f"""
+set -e
+export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
+source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
+cd {shlex.quote(workspace)}
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python da3_remote_pipeline.py retry-failed --workspace {shlex.quote(workspace)}
+"""
+    runner.bash(script, timeout=300)
+
+
 def print_status(runner: RemoteRunner, cfg: dict) -> None:
     print_step("Remote DA3 status")
     print(remote_status(runner, cfg))
@@ -526,6 +540,14 @@ def command_launch(args: argparse.Namespace) -> None:
 def command_status(args: argparse.Namespace) -> None:
     cfg = resolve_config(args)
     with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
+        print_status(runner, cfg)
+
+
+def command_retry_failed(args: argparse.Namespace) -> None:
+    cfg = resolve_config(args)
+    with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
+        sync_remote_session_config(runner, cfg)
+        retry_failed_remote_tasks(runner, cfg)
         print_status(runner, cfg)
 
 
@@ -631,6 +653,10 @@ def build_parser() -> argparse.ArgumentParser:
     status = subparsers.add_parser("status", help="Print remote pipeline status")
     add_common(status)
     status.set_defaults(handler=command_status)
+
+    retry_failed = subparsers.add_parser("retry-failed", help="Retry failed remote tasks")
+    add_common(retry_failed)
+    retry_failed.set_defaults(handler=command_retry_failed)
 
     datop = subparsers.add_parser("datop", help="Show a live remote status dashboard")
     add_common(datop)

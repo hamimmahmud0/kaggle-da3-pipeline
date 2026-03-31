@@ -94,6 +94,28 @@ class ResolveConfigTest(unittest.TestCase):
         self.assertIn("gdown", script)
         self.assertIn("python -m pip install --no-cache-dir -e .", script)
 
+    def test_retry_failed_command_is_available_in_parser(self) -> None:
+        parser = module.build_parser()
+
+        args = parser.parse_args(["retry-failed"])
+
+        self.assertEqual(args.command, "retry-failed")
+        self.assertIs(args.handler, module.command_retry_failed)
+
+    def test_retry_failed_remote_tasks_invokes_remote_pipeline_command(self) -> None:
+        runner = unittest.mock.Mock()
+        cfg = {
+            "remote_workspace": "/kaggle/working/DA3",
+            "remote_miniforge": "/kaggle/working/miniforge3",
+            "remote_env_name": "da3-remote",
+        }
+
+        module.retry_failed_remote_tasks(runner, cfg)
+
+        script = runner.bash.call_args.args[0]
+        self.assertIn("python da3_remote_pipeline.py retry-failed", script)
+        self.assertIn("--workspace /kaggle/working/DA3", script)
+
 
 if __name__ == "__main__":
     unittest.main()

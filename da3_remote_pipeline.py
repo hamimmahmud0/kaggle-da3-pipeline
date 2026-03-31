@@ -499,6 +499,25 @@ def complete_task(session: dict, worker_name: str, task_id: str, *, elapsed_ms: 
     refresh_summary(session)
 
 
+def retry_failed_tasks(workspace: Path) -> dict:
+    paths = ensure_workspace(workspace)
+    with session_lock(paths["lock"]):
+        session = read_session(workspace)
+        if not session:
+            raise SystemExit("Session is not initialized. Run init-session first.")
+        for task in session.get("tasks", []):
+            if task.get("status") != "failed":
+                continue
+            task["status"] = "pending"
+            task["claimed_by"] = None
+            task["started_at"] = None
+            task["completed_at"] = None
+            task["elapsed_ms"] = None
+            task["last_error"] = None
+        save_session(workspace, session)
+        return refresh_summary(session)
+
+
 def heartbeat(session: dict, worker_name: str, pid: int) -> None:
     session["workers"][worker_name]["pid"] = pid
     session["workers"][worker_name]["last_heartbeat"] = iso_now()
@@ -1260,6 +1279,11 @@ def handle_status(args: argparse.Namespace) -> None:
     print(f"Failed: {summary.get('failed', 0)}")
 
 
+def handle_retry_failed(args: argparse.Namespace) -> None:
+    session = retry_failed_tasks(Path(args.workspace))
+    print(json.dumps(session, indent=2))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Remote DA3 multi-worker runtime.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1287,6 +1311,10 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE))
     status_parser.add_argument("--json", action="store_true")
     status_parser.set_defaults(handler=handle_status)
+
+    retry_parser = subparsers.add_parser("retry-failed", help="Move failed tasks back to pending")
+    retry_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE))
+    retry_parser.set_defaults(handler=handle_retry_failed)
     return parser
 
 
