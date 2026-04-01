@@ -20,8 +20,9 @@ REMOTE_PIPELINE_LOCAL = ROOT / "da3_remote_pipeline.py"
 REMOTE_LAUNCHER_LOCAL = ROOT / "run_da3_pipeline.sh"
 REMOTE_INFERENCE_SERVER_LOCAL = ROOT / "da3_inference_server.py"
 FARE_DRIVE_LOCAL = ROOT / "Fare-Drive"
-DEFAULT_CONFIG_FILE = ROOT / "da3_remote.sample.json"
+DEFAULT_CONFIG_FILE = ROOT / "da3_remote.json"
 DEPTH_ANYTHING_REPO_URL = "https://github.com/ByteDance-Seed/Depth-Anything-3.git"
+DATOP_REFRESH_SECONDS = 2.0
 
 ENV_KEYS = {
     "host": "DA3_HOST",
@@ -43,6 +44,7 @@ ENV_KEYS = {
     "inference_batch_size": "DA3_INFERENCE_BATCH_SIZE",
     "video_frame_task_size": "DA3_VIDEO_FRAME_TASK_SIZE",
     "export_format": "DA3_EXPORT_FORMAT",
+    "hf_token": "HF_TOKEN",
 }
 
 DEFAULTS = {
@@ -63,6 +65,7 @@ DEFAULTS = {
     "inference_batch_size": 16,
     "video_frame_task_size": 16,
     "export_format": "npz",
+    "hf_token": "",
 }
 
 
@@ -219,11 +222,14 @@ def resolve_config(args: argparse.Namespace) -> dict:
             if env_name in env_values and env_values[env_name] != "":
                 cfg[key] = env_values[env_name]
 
-    if args.config_file:
-        config_values = parse_json_config(Path(args.config_file))
+    config_path = Path(args.config_file) if args.config_file else DEFAULT_CONFIG_FILE
+    if config_path.exists():
+        config_values = parse_json_config(config_path)
         for key in ENV_KEYS:
             if key in config_values and config_values[key] not in (None, ""):
                 cfg[key] = config_values[key]
+        if config_values.get("HF_TOKEN") not in (None, ""):
+            cfg["hf_token"] = config_values["HF_TOKEN"]
 
     for key in ENV_KEYS:
         value = getattr(args, key, None)
@@ -238,8 +244,10 @@ def resolve_config(args: argparse.Namespace) -> dict:
     required_by_command = {
         "verify": ["password"],
         "setup": ["password", "local_fare_drive_access_token"],
+        "fare-drive-login": ["password", "local_fare_drive_access_token"],
         "upload-pipeline": ["password"],
         "launch": ["password"],
+        "stop": ["password"],
         "status": ["password"],
         "datop": ["password"],
         "datalog": ["password"],
@@ -372,6 +380,7 @@ def build_remote_session_config(cfg: dict) -> dict:
         "inference_batch_size": cfg["inference_batch_size"],
         "video_frame_task_size": cfg["video_frame_task_size"],
         "export_format": cfg["export_format"],
+        "hf_token": cfg.get("hf_token", ""),
         "fare_drive": {
             "endpoint": cfg["local_fare_drive_endpoint"],
             "access_token": cfg["local_fare_drive_access_token"],
@@ -454,6 +463,21 @@ DA3_ENV_PYTHON={shlex.quote(env_python)} ./run_da3_pipeline.sh launch --workspac
     runner.bash(script, timeout=300)
 
 
+def stop_remote_pipeline(runner: RemoteRunner, cfg: dict) -> None:
+    print_step("Stopping remote DA3 workers")
+    workspace = cfg["remote_workspace"]
+    miniforge = cfg["remote_miniforge"]
+    env_name = cfg["remote_env_name"]
+    script = f"""
+set -e
+export MAMBA_ROOT_PREFIX={shlex.quote(miniforge)}
+source <({shlex.quote(miniforge)}/micromamba shell hook -s bash)
+cd {shlex.quote(workspace)}
+{shlex.quote(miniforge)}/micromamba run -n {shlex.quote(env_name)} python da3_remote_pipeline.py stop --workspace {shlex.quote(workspace)}
+"""
+    runner.bash(script, timeout=300)
+
+
 def remote_status(runner: RemoteRunner, cfg: dict) -> str:
     workspace = cfg["remote_workspace"]
     miniforge = cfg["remote_miniforge"]
@@ -529,11 +553,26 @@ def command_upload_pipeline(args: argparse.Namespace) -> None:
         upload_pipeline_assets(runner, cfg)
 
 
+def command_fare_drive_login(args: argparse.Namespace) -> None:
+    cfg = resolve_config(args)
+    with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
+        configure_remote_fare_drive_client(runner, cfg)
+        sync_remote_session_config(runner, cfg)
+        print_status(runner, cfg)
+
+
 def command_launch(args: argparse.Namespace) -> None:
     cfg = resolve_config(args)
     with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
         sync_remote_session_config(runner, cfg)
         launch_remote_pipeline(runner, cfg)
+        print_status(runner, cfg)
+
+
+def command_stop(args: argparse.Namespace) -> None:
+    cfg = resolve_config(args)
+    with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
+        stop_remote_pipeline(runner, cfg)
         print_status(runner, cfg)
 
 
@@ -579,15 +618,23 @@ def render_datop(status_payload: dict) -> str:
 
 def command_datop(args: argparse.Namespace) -> None:
     cfg = resolve_config(args)
+    refresh_seconds = max(float(args.refresh_seconds), DATOP_REFRESH_SECONDS)
     with RemoteRunner(cfg["host"], cfg["port"], cfg["username"], cfg["password"]) as runner:  # type: ignore[attr-defined]
         while True:
-            payload = json.loads(remote_status(runner, cfg))
+            try:
+                payload = json.loads(remote_status(runner, cfg))
+            except RemoteError as exc:
+                if args.once:
+                    raise
+                print(f"datop refresh failed: {exc}", file=sys.stderr)
+                time.sleep(refresh_seconds)
+                continue
             if sys.stdout.isatty():
                 sys.stdout.write("\x1b[2J\x1b[H")
             print(render_datop(payload))
             if args.once:
                 break
-            time.sleep(args.refresh_seconds)
+            time.sleep(refresh_seconds)
 
 
 def build_datalog_tail_script(workspace: str, lines: int) -> str:
@@ -642,6 +689,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(setup)
     setup.set_defaults(handler=command_setup)
 
+    fare_drive_login = subparsers.add_parser("fare-drive-login", help="Update the remote Fare Drive client token")
+    add_common(fare_drive_login)
+    fare_drive_login.set_defaults(handler=command_fare_drive_login)
+
     upload = subparsers.add_parser("upload-pipeline", help="Upload the latest runtime files")
     add_common(upload)
     upload.set_defaults(handler=command_upload_pipeline)
@@ -649,6 +700,10 @@ def build_parser() -> argparse.ArgumentParser:
     launch = subparsers.add_parser("launch", help="Launch the remote DA3 worker processes")
     add_common(launch)
     launch.set_defaults(handler=command_launch)
+
+    stop = subparsers.add_parser("stop", help="Stop the remote DA3 worker processes")
+    add_common(stop)
+    stop.set_defaults(handler=command_stop)
 
     status = subparsers.add_parser("status", help="Print remote pipeline status")
     add_common(status)
@@ -660,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     datop = subparsers.add_parser("datop", help="Show a live remote status dashboard")
     add_common(datop)
-    datop.add_argument("--refresh-seconds", type=float, default=2.0)
+    datop.add_argument("--refresh-seconds", type=float, default=DATOP_REFRESH_SECONDS)
     datop.add_argument("--once", action="store_true")
     datop.set_defaults(handler=command_datop)
 

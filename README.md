@@ -4,7 +4,7 @@ This repository is a manager/worker version of the DA3 pipeline, modeled after `
 
 ## What Is Here
 
-- `automate_da3_remote.py`: local control plane for SSH setup, remote bootstrap, launch, failed-task retry, `datop`, and `datalog`
+- `da3-pipe`: local control plane for SSH setup, remote bootstrap, launch, failed-task retry, `datop`, and `datalog`
 - `da3_remote_pipeline.py`: remote session runtime with worker state, task claiming, and output uploads
 - `da3_inference_server.py`: per-GPU inference backend used by the remote workers
 - `run_da3_pipeline.sh`: remote launcher wrapper
@@ -70,19 +70,19 @@ Example `da3_remote.json`:
 Verify the remote host:
 
 ```bash
-python automate_da3_remote.py verify --config-file da3_remote.json
+python da3-pipe verify --config-file da3_remote.json
 ```
 
 Bootstrap the remote side:
 
 ```bash
-python automate_da3_remote.py setup --config-file da3_remote.json
+python da3-pipe setup --config-file da3_remote.json
 ```
 
 Launch the workers:
 
 ```bash
-python automate_da3_remote.py launch --config-file da3_remote.json
+python da3-pipe launch --config-file da3_remote.json
 ```
 
 Watch status or logs:
@@ -95,7 +95,7 @@ Watch status or logs:
 Retry only the failed tasks without reinitializing the whole session:
 
 ```bash
-python automate_da3_remote.py retry-failed --config-file da3_remote.json
+python da3-pipe retry-failed --config-file da3_remote.json
 ```
 
 This resets failed tasks back to `pending`, clears their previous error metadata, and leaves completed tasks untouched.

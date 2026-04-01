@@ -1,0 +1,84 @@
+cat > monitor.py << "EOF"
+import psutil, time, os, subprocess
+
+class C:
+    RED="\033[91m"; GREEN="\033[92m"; YELLOW="\033[93m"
+    CYAN="\033[96m"; RESET="\033[0m"
+
+cpu_hist = []
+
+def bar(val, max_val=100, width=30):
+    filled = int(val/max_val * width)
+    return "█"*filled + "-"*(width-filled)
+
+def get_size(bytes):
+    for unit in ["B","KB","MB","GB","TB"]:
+        if bytes < 1024:
+            return f"{bytes:.1f}{unit}"
+        bytes /= 1024
+
+def gpu_info():
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"]
+        ).decode().strip().split("\n")
+        return [tuple(map(int, l.split(", "))) for l in out]
+    except:
+        return []
+
+def gpu_processes():
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"]
+        ).decode().strip().split("\n")
+        return {int(pid): int(mem) for pid, mem in (l.split(", ") for l in out if l)}
+    except:
+        return {}
+
+while True:
+    os.system("clear")
+    print(C.CYAN + "====== BTOP-LITE (SSH MODE) ======\n" + C.RESET)
+
+    cpu = psutil.cpu_percent()
+    cpu_hist.append(cpu)
+    if len(cpu_hist) > 30: cpu_hist.pop(0)
+
+    print(f"CPU: {cpu}%")
+    print(bar(cpu))
+    print("History:")
+    print("".join("▁▂▃▄▅▆▇"[min(int(x/15),6)] for x in cpu_hist), "\n")
+
+    mem = psutil.virtual_memory()
+    print(f"RAM: {mem.percent}%  {get_size(mem.used)}/{get_size(mem.total)}")
+    print(bar(mem.percent), "\n")
+
+    disk = psutil.disk_usage("/")
+    print(f"Disk: {disk.percent}%  {get_size(disk.used)}/{get_size(disk.total)}")
+    print(bar(disk.percent), "\n")
+
+    net1 = psutil.net_io_counters()
+    time.sleep(1)
+    net2 = psutil.net_io_counters()
+
+    up = net2.bytes_sent - net1.bytes_sent
+    down = net2.bytes_recv - net1.bytes_recv
+    print(f"Net ↑ {get_size(up)}/s ↓ {get_size(down)}/s\n")
+
+    gpus = gpu_info()
+    if gpus:
+        print(C.GREEN + "GPU:" + C.RESET)
+        for i,(u,used,total) in enumerate(gpus):
+            print(f"GPU{i}: {u}% {used}MB/{total}MB")
+            print(bar(u))
+        print()
+
+    time.sleep(5)
+
+
+EOF
+pip install psutil >/dev/null 2>&1
+python3 monitor.py

@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from contextlib import contextmanager
@@ -106,9 +107,23 @@ def load_json(path: Path, default):
 
 def save_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f"{path.name}.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temp_path.replace(path)
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            handle.write(serialized)
+            temp_name = handle.name
+        Path(temp_name).replace(path)
+    finally:
+        if temp_name:
+            Path(temp_name).unlink(missing_ok=True)
 
 
 def build_tasks_from_manifest(manifest_path: str, default_export_format: str = DEFAULT_EXPORT_FORMAT) -> list[dict]:
@@ -399,6 +414,7 @@ def init_session(workspace: Path, config_file: str | None = None) -> dict:
         "inference_batch_size": int(config.get("inference_batch_size", 16)),
         "video_frame_task_size": video_frame_task_size,
         "export_format": export_format,
+        "hf_token": str(config.get("hf_token", config.get("HF_TOKEN", "")) or ""),
         "fare_drive": fare_drive,
         "tasks": tasks,
         "workers": {
@@ -443,6 +459,8 @@ def update_session_config(workspace: Path, config_file: str | None = None) -> di
     session["inference_batch_size"] = int(config.get("inference_batch_size", session.get("inference_batch_size", 16)))
     session["video_frame_task_size"] = int(config.get("video_frame_task_size", session.get("video_frame_task_size", VIDEO_FRAME_TASK_SIZE)))
     session["export_format"] = str(config.get("export_format", session.get("export_format", DEFAULT_EXPORT_FORMAT)) or DEFAULT_EXPORT_FORMAT)
+    if config.get("hf_token", config.get("HF_TOKEN")) not in (None, ""):
+        session["hf_token"] = str(config.get("hf_token", config.get("HF_TOKEN", "")) or "")
     if "fare_drive" in config and isinstance(config["fare_drive"], dict):
         merged_fare_drive = dict(session.get("fare_drive", {}))
         for key, value in config["fare_drive"].items():
@@ -629,6 +647,7 @@ def restore_session_from_fare_drive(workspace: Path, config: dict) -> dict | Non
         config.get("video_frame_task_size", restored.get("video_frame_task_size", VIDEO_FRAME_TASK_SIZE))
     )
     restored["export_format"] = str(config.get("export_format", restored.get("export_format", DEFAULT_EXPORT_FORMAT)) or DEFAULT_EXPORT_FORMAT)
+    restored["hf_token"] = str(config.get("hf_token", config.get("HF_TOKEN", restored.get("hf_token", ""))) or "")
     merged_fare_drive = dict(restored.get("fare_drive", {}))
     for key, value in fare_drive.items():
         if value not in (None, ""):
@@ -781,12 +800,16 @@ def reconcile_task_runtime_state(session: dict) -> dict:
     return session
 
 
-def backend_script(workspace: Path, worker_name: str, device_no: int, port: int, batch_size: int) -> str:
+def backend_script(workspace: Path, worker_name: str, device_no: int, port: int, batch_size: int, hf_token: str = "") -> str:
     paths = workspace_paths(workspace)
     backend_log = paths["logs"] / f"backend_{worker_name}.log"
+    auth_env = ""
+    if hf_token:
+        quoted_token = shlex_quote(hf_token)
+        auth_env = f"HF_TOKEN={quoted_token} HUGGINGFACE_HUB_TOKEN={quoted_token} "
     return (
         f"cd {shlex_quote(str(workspace))} && "
-        f"PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+        f"PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True {auth_env}"
         f"{shlex_quote(sys.executable)} da3_inference_server.py --device-no {device_no} --port {port} --batch-size {batch_size} "
         f">> {shlex_quote(str(backend_log))} 2>&1"
     )
@@ -838,6 +861,16 @@ def upload_artifacts_via_fare_drive(workspace: Path, session: dict, task: dict) 
         raise RuntimeError(f"Expected output directory is missing: {output_dir}")
     remote_path = "/".join(part for part in [upload_root, str(task["video_name"]), str(task["file_name"])] if part)
     return upload_file_via_fare_drive(workspace, fare_drive, output_dir, remote_path)
+
+
+def cleanup_uploaded_output_artifacts(workspace: Path, task: dict) -> None:
+    output_dir = workspace / "output" / str(task["video_name"]) / str(task["file_name"])
+    if output_dir.exists():
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+    video_dir = output_dir.parent
+    if video_dir.exists() and not any(video_dir.iterdir()):
+        video_dir.rmdir()
 
 
 def get_video_frame_count(video_path: Path) -> int | None:
@@ -996,7 +1029,38 @@ def prepare_video_for_frame_extraction(video_path: Path) -> Path:
     return video_path
 
 
-def resolve_task_image_paths(workspace: Path, task: dict) -> list[str]:
+def restore_missing_task_video(workspace: Path, session: dict, task: dict, video_path: Path) -> Path:
+    if video_path.exists():
+        return video_path
+
+    alternate_video_path = video_path.with_suffix(".mp4") if video_path.suffix.lower() == ".dav" else None
+    if alternate_video_path and alternate_video_path.exists():
+        return alternate_video_path
+
+    drive_root = workspace / "incoming" / "drive-folder"
+    fare_drive_root = workspace / "incoming" / "fare-drive"
+
+    if video_path.is_relative_to(drive_root):
+        drive_folder_url = str(session.get("drive_folder_url", "") or "").strip()
+        if drive_folder_url:
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            download_drive_folder(drive_folder_url, drive_root)
+    elif video_path.is_relative_to(fare_drive_root):
+        fare_drive = session.get("fare_drive", {})
+        remote_input_root = str(fare_drive.get("input_root", "") or "").strip("/")
+        if remote_input_root:
+            remote_path = "/".join([remote_input_root, video_path.relative_to(fare_drive_root).as_posix()])
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            download_fare_drive_path(workspace, fare_drive, remote_path, video_path.parent)
+
+    if video_path.exists():
+        return video_path
+    if alternate_video_path and alternate_video_path.exists():
+        return alternate_video_path
+    raise RuntimeError(f"Video file is missing: {video_path}")
+
+
+def resolve_task_image_paths(workspace: Path, session: dict, task: dict) -> list[str]:
     image_paths = [str(path) for path in task.get("image_paths", []) if path]
     if image_paths:
         return image_paths
@@ -1008,6 +1072,7 @@ def resolve_task_image_paths(workspace: Path, task: dict) -> list[str]:
     video_path = Path(video_path_value)
     if not video_path.is_absolute():
         video_path = (workspace / video_path).resolve()
+    video_path = restore_missing_task_video(workspace, session, task, video_path)
 
     frames_dir = workspace / "incoming" / "frames" / safe_segment(task.get("id", video_path.stem), video_path.stem)
     frame_start = int(task.get("frame_start", 0) or 0)
@@ -1050,7 +1115,7 @@ def worker_loop(workspace: Path, worker_name: str) -> int:
     )
 
     backend_process = subprocess.Popen(
-        ["bash", "-lc", backend_script(workspace, worker_name, device_no, backend_port, inference_batch_size)],
+        ["bash", "-lc", backend_script(workspace, worker_name, device_no, backend_port, inference_batch_size, str(session.get("hf_token", "") or ""))],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -1099,7 +1164,7 @@ def worker_loop(workspace: Path, worker_name: str) -> int:
                     f"frame_start={task.get('frame_start')} frame_end={task.get('frame_end')}",
                 )
                 append_worker_log(worker_log, f"input-resolve-start id={task['id']}")
-                image_paths = resolve_task_image_paths(workspace, task)
+                image_paths = resolve_task_image_paths(workspace, session, task)
                 append_worker_log(worker_log, f"input-resolve-done id={task['id']} frames={len(image_paths)}")
                 append_worker_log(
                     worker_log,
@@ -1130,6 +1195,7 @@ def worker_loop(workspace: Path, worker_name: str) -> int:
                 append_worker_log(worker_log, f"upload-start id={task['id']}")
                 uploaded_path = upload_artifacts_via_fare_drive(workspace, session, task)
                 append_worker_log(worker_log, f"upload-done id={task['id']} uploaded_path={uploaded_path}")
+                cleanup_uploaded_output_artifacts(workspace, task)
                 with session_lock(paths["lock"]):
                     session = read_session(workspace)
                     heartbeat(session, worker_name, os.getpid())
@@ -1218,10 +1284,27 @@ def launch(workspace: Path) -> dict:
     return pids
 
 
+def stop(workspace: Path) -> dict:
+    paths = ensure_workspace(workspace)
+    with session_lock(paths["lock"]):
+        session = read_session(workspace)
+        if not session:
+            raise SystemExit("Session is not initialized. Run init-session first.")
+        cleanup_launch_processes(session)
+        session["updated_at"] = iso_now()
+        save_session(workspace, session)
+    save_json(paths["pipeline_pid"], {"workers": {}, "updated_at": iso_now()})
+    runtime = load_json(paths["runtime"], {})
+    runtime["last_launch_at"] = None
+    save_json(paths["runtime"], runtime)
+    return refresh_summary(session)
+
+
 def status_payload(workspace: Path) -> dict:
     paths = ensure_workspace(workspace)
-    session = reconcile_task_runtime_state(sync_worker_runtime_state(read_session(workspace)))
-    save_json(paths["session"], refresh_summary(session))
+    with session_lock(paths["lock"]):
+        session = reconcile_task_runtime_state(sync_worker_runtime_state(read_session(workspace)))
+        save_json(paths["session"], refresh_summary(session))
     fare_drive_status = "unknown"
     fare_drive = session.get("fare_drive", {})
     endpoint = fare_drive.get("endpoint", "")
@@ -1255,6 +1338,11 @@ def handle_update_session_config(args: argparse.Namespace) -> None:
 
 def handle_launch(args: argparse.Namespace) -> None:
     payload = launch(Path(args.workspace))
+    print(json.dumps(payload, indent=2))
+
+
+def handle_stop(args: argparse.Namespace) -> None:
+    payload = stop(Path(args.workspace))
     print(json.dumps(payload, indent=2))
 
 
@@ -1301,6 +1389,10 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser = subparsers.add_parser("launch", help="Launch worker processes in the background")
     launch_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE))
     launch_parser.set_defaults(handler=handle_launch)
+
+    stop_parser = subparsers.add_parser("stop", help="Stop worker and backend processes")
+    stop_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE))
+    stop_parser.set_defaults(handler=handle_stop)
 
     worker_parser = subparsers.add_parser("worker", help="Run one worker loop")
     worker_parser.add_argument("--workspace", default=str(DEFAULT_WORKSPACE))

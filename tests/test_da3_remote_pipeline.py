@@ -84,6 +84,15 @@ class RemotePipelineSessionTest(unittest.TestCase):
         self.assertIn("--batch-size 7", script)
         self.assertIn("PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True", script)
 
+    def test_backend_script_exports_hf_token_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir) / "workspace"
+
+            script = module.backend_script(workspace, "worker_a", 0, 8008, 7, hf_token="hf_demo_token")
+
+        self.assertIn("HF_TOKEN=hf_demo_token", script)
+        self.assertIn("HUGGINGFACE_HUB_TOKEN=hf_demo_token", script)
+
     def test_sync_worker_runtime_state_marks_dead_workers_as_error(self) -> None:
         session = {
             "workers": {
@@ -395,6 +404,71 @@ class RemotePipelineSessionTest(unittest.TestCase):
         self.assertIsNone(session["tasks"][0]["started_at"])
         self.assertIsNone(session["tasks"][0]["last_error"])
 
+    def test_stop_cleans_up_workers_and_clears_runtime_launch_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir) / "workspace"
+            module.ensure_workspace(workspace)
+            module.save_json(
+                module.workspace_paths(workspace)["session"],
+                {
+                    "workers": {
+                        "worker_a": {
+                            "pid": 111,
+                            "backend_port": 8008,
+                            "claimed_task": "task-1",
+                            "status": "running",
+                        }
+                    },
+                    "tasks": [
+                        {
+                            "id": "task-1",
+                            "status": "running",
+                            "claimed_by": "worker_a",
+                            "started_at": "2026-01-01T00:00:00Z",
+                            "last_error": "old",
+                        }
+                    ],
+                    "summary": {"pending": 0, "running": 1, "completed": 0, "failed": 0, "total": 1},
+                },
+            )
+            module.save_json(module.workspace_paths(workspace)["runtime"], {"last_launch_at": "2026-01-01T00:00:00Z"})
+
+            with mock.patch.object(module, "cleanup_launch_processes") as cleanup_mock:
+                def cleanup_side_effect(session: dict) -> None:
+                    session["workers"]["worker_a"]["pid"] = None
+                    session["workers"]["worker_a"]["claimed_task"] = None
+                    session["workers"]["worker_a"]["status"] = "idle"
+                    session["tasks"][0]["status"] = "pending"
+                    session["tasks"][0]["claimed_by"] = None
+                    session["tasks"][0]["started_at"] = None
+                    session["tasks"][0]["last_error"] = None
+
+                cleanup_mock.side_effect = cleanup_side_effect
+                payload = module.stop(workspace)
+
+            runtime = module.load_json(module.workspace_paths(workspace)["runtime"], {})
+            pipeline_pid = module.load_json(module.workspace_paths(workspace)["pipeline_pid"], {})
+
+        self.assertEqual(payload["summary"]["running"], 0)
+        self.assertEqual(payload["summary"]["pending"], 1)
+        self.assertIsNone(runtime["last_launch_at"])
+        self.assertEqual(pipeline_pid["workers"], {})
+
+    def test_cleanup_uploaded_output_artifacts_removes_uploaded_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir) / "workspace"
+            output_dir = workspace / "output" / "video-a" / "clip-a"
+            output_dir.mkdir(parents=True)
+            (output_dir / "result.glb").write_bytes(b"glb")
+
+            module.cleanup_uploaded_output_artifacts(
+                workspace,
+                {"video_name": "video-a", "file_name": "clip-a"},
+            )
+
+        self.assertFalse(output_dir.exists())
+        self.assertFalse((workspace / "output" / "video-a").exists())
+
     def test_reconcile_task_runtime_state_resets_orphaned_running_tasks(self) -> None:
         session = {
             "workers": {
@@ -573,6 +647,34 @@ class RemotePipelineSessionTest(unittest.TestCase):
                 self.assertTrue(Path(frame_paths[0]).exists())
 
         self.assertEqual(len(frame_paths), 1)
+
+    def test_resolve_task_image_paths_restores_missing_drive_video(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            workspace = Path(tempdir) / "workspace"
+            video_path = workspace / "incoming" / "drive-folder" / "clip.dav"
+            task = {
+                "id": "video-0000-demo-0000",
+                "video_path": str(video_path),
+                "image_paths": [],
+                "frame_start": 4,
+                "frame_end": 7,
+            }
+            session = {"drive_folder_url": "https://drive.google.com/drive/folders/demo"}
+
+            def fake_download(_url: str, output_dir: Path) -> None:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                video_path.write_bytes(b"video")
+
+            with mock.patch.object(module, "download_drive_folder", side_effect=fake_download) as download_mock, mock.patch.object(
+                module, "extract_video_frames", return_value=["frame_000004.png"]
+            ) as extract_mock:
+                frame_paths = module.resolve_task_image_paths(workspace, session, task)
+
+        self.assertEqual(frame_paths, ["frame_000004.png"])
+        self.assertEqual(download_mock.call_args.args[1], workspace / "incoming" / "drive-folder")
+        self.assertEqual(extract_mock.call_args.args[0], video_path)
+        self.assertEqual(extract_mock.call_args.kwargs["frame_start"], 4)
+        self.assertEqual(extract_mock.call_args.kwargs["frame_end"], 7)
 
 
 if __name__ == "__main__":
